@@ -1,0 +1,466 @@
+substitutions:
+  display_name: Miro Humidifier
+
+esphome:
+  name: miro-humidifier
+  includes:
+    - uart_read_line_sensor.h
+  # Query Miro device type on start
+  on_boot:
+    # Delay required at this stage to keep ESP from stalling if rebooted while plugged into Miro
+    #   No idea why :(
+    - priority: 600
+      then:
+        - lambda: |-        
+            delay(1000);
+    - priority: -100
+      then:
+        # Request model info
+        - uart.write: '#ANY,000,S,1,WHO:?;'
+        - delay: 1s
+        # Get current states
+        - uart.write:
+            id: uart_bus
+            data: !lambda
+              std::string cmd = "#" + id(model_number).state + ",000,S,1,REQ:ALL;";
+              std::vector<unsigned char> v(cmd.begin(), cmd.end());
+              return v;
+        # Turn off everything on boot
+        - delay: 1s
+        - switch.turn_off: humidifier_sound
+        - delay: 1s
+        - select.set:
+            id: humidifier_level
+            option: '0'
+        - delay: 1s
+        # Device power required to run RGB
+        - switch.turn_on: humidifier_power
+        - delay: 500ms
+        - light.turn_off: humidifier_light
+
+esp32:
+  board: esp32doit-devkit-v1
+  framework:
+    type: arduino
+
+# Red LED
+status_led:
+  pin: 26
+
+# Enable logging
+logger:
+  level: DEBUG
+
+# Enable Home Assistant API
+api:
+  password: ""
+  reboot_timeout: 0s
+
+ota:
+  password: ""
+
+wifi:
+  ssid: "SSID"
+  password: "PASSWORD"
+  reboot_timeout: 0s
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Humidifier Fallback Hotspot"
+    password: "PASSWORD"
+
+captive_portal:
+
+# Using the second UART on ESP32
+uart:
+  id: uart_bus
+  tx_pin: 17
+  rx_pin: 16
+  baud_rate: 115200
+
+
+switch:
+  - platform: template
+    name: "${display_name} Power"
+    id: humidifier_power
+    optimistic: true
+    turn_on_action:
+      - uart.write:
+          id: uart_bus
+          data: !lambda
+            std::string cmd = "#" + id(model_number).state + ",000,C,1,PWR:1;";
+            std::vector<unsigned char> v(cmd.begin(), cmd.end());
+            return v;
+    turn_off_action:
+      - uart.write:
+          id: uart_bus
+          data: !lambda
+            std::string cmd = "#" + id(model_number).state + ",000,C,1,PWR:0;";
+            std::vector<unsigned char> v(cmd.begin(), cmd.end());
+            return v;
+  - platform: template
+    name: "${display_name} Sound"
+    id: humidifier_sound
+    optimistic: true
+    icon: "mdi:music-note"
+    turn_on_action:
+      - uart.write:
+          id: uart_bus
+          data: !lambda
+            std::string cmd = "#" + id(model_number).state + ",000,C,1,MU:0;";
+            std::vector<unsigned char> v(cmd.begin(), cmd.end());
+            return v;
+    turn_off_action:
+      - uart.write:
+          id: uart_bus
+          data: !lambda
+            std::string cmd = "#" + id(model_number).state + ",000,C,1,MU:1;";
+            std::vector<unsigned char> v(cmd.begin(), cmd.end());
+            return v;
+
+binary_sensor:
+  - platform: template
+    name: "${display_name} Low Water"
+    id: low_water
+    device_class: problem
+  - platform: template
+    internal: true
+    name: "RGB Mode"
+    id: rgb_mode
+  - platform: template
+    internal: true
+    name: "Light effect active"
+    id: light_effect_active
+    lambda: |-
+      return humidifier_light->get_effect_name() != "None";
+    on_release:
+      then:
+        - select.set:
+            id: humidifier_light_mode
+            option: "2"
+  - platform: gpio
+    pin: 25
+    disabled_by_default: true
+    name: "${display_name} Button"
+    id: button
+
+select:
+  - platform: template
+    name: "${display_name} Level"
+    id: humidifier_level
+    optimistic: true
+    options:
+      - '0'
+      - '1'
+      - '2'
+      - '3'
+    initial_option: '0'
+    set_action:
+      - uart.write:
+          id: uart_bus
+          data: !lambda
+            std::string cmd = "#" + id(model_number).state + ",000,C,1,HC:" + x + ";";
+            std::vector<unsigned char> v(cmd.begin(), cmd.end());
+            return v;
+  - platform: template
+    internal: true
+    name: "${display_name} Light Brightness"
+    id: humidifier_brightness
+    optimistic: true
+    options:
+      - '1'
+      - '2'
+      - '3'
+      - '4'
+      - '5'
+    initial_option: '5'
+    set_action:
+      - uart.write:
+          id: uart_bus
+          data: !lambda
+            std::map<std::string, std::string> reverseValues = {
+              {"1", "5"},
+              {"2", "4"},
+              {"3", "3"},
+              {"4", "2"},
+              {"5", "1"}
+            };
+            std::string cmd = "#" + id(model_number).state + ",000,C,3,LM:" + id(humidifier_light_mode).state + ",LC:0,LB:" + reverseValues[x] + ";";
+            std::vector<unsigned char> v(cmd.begin(), cmd.end());
+            return v;
+  # Not really necessary when we can use RGB control instead
+  - platform: template
+    internal: true
+    name: "${display_name} Light Color Preset"
+    id: humidifier_light_color_preset
+    optimistic: true
+    options:
+      - '0'
+      - '1'
+      - '2'
+      - '3'
+      - '4'
+      - '5'
+      - '6'
+      - '7'
+      - '8'
+      - '9'
+      - '10'
+      - '11'
+      - '12'
+    initial_option: '0'
+  - platform: template
+    internal: true
+    name: "${display_name} Light Mode"
+    id: humidifier_light_mode
+    optimistic: true
+    options:
+      - '0' # Off
+      - '1' # Rainbow
+      - '2' # RGB
+      - '3' # Preset color
+    initial_option: '1'
+    set_action:
+      - uart.write:
+          id: uart_bus
+          data: !lambda
+            std::map<std::string, std::string> reverseValues = {
+              {"1", "5"},
+              {"2", "4"},
+              {"3", "3"},
+              {"4", "2"},
+              {"5", "1"}
+            };
+            std::string mode = x;
+            std::string cmd = "#" + id(model_number).state + ",000,C,3,LM:" + x + ",LC:0,LB:" + reverseValues[id(humidifier_brightness).state] + ";";
+            std::vector<unsigned char> v(cmd.begin(), cmd.end());
+            return v;
+      - if:
+          condition:
+            lambda: 'return x != "2";'
+          then:
+            - binary_sensor.template.publish:
+                id: rgb_mode
+                state: OFF
+            
+
+output:
+  - platform: template
+    id: red
+    type: float
+    min_power: 0.0
+    max_power: 1.0
+    write_action:
+      # - logger.log:
+      #     format: "R: %.1f"
+      #     args: [ 'state' ]
+      - uart.write:
+          id: uart_bus
+          data: !lambda
+            int r = state * 100;
+            std::string cmd = "#" + id(model_number).state + ",000,C,3,LM:2,LB:1,R:" + to_string(r) + ";";
+            std::vector<unsigned char> v(cmd.begin(), cmd.end());
+            return v;
+  - platform: template
+    id: green
+    type: float
+    min_power: 0.0
+    max_power: 1.0
+    write_action:
+      # - logger.log:
+      #     format: "G: %.1f"
+      #     args: [ 'state' ]
+      - uart.write:
+          id: uart_bus
+          data: !lambda
+            int g = state * 100;
+            std::string cmd = "#" + id(model_number).state + ",000,C,3,LM:2,LB:1,G:" + to_string(g) + ";";
+            std::vector<unsigned char> v(cmd.begin(), cmd.end());
+            return v;
+  - platform: template
+    id: blue
+    type: float
+    min_power: 0.0
+    max_power: 1.0
+    write_action:
+      # - logger.log:
+      #     format: "B: %.1f"
+      #     args: [ 'state' ]
+      - uart.write:
+          id: uart_bus
+          data: !lambda
+            int b = state * 100;
+            std::string cmd = "#" + id(model_number).state + ",000,C,3,LM:2,LB:1,B:" + to_string(b) + ";";
+            std::vector<unsigned char> v(cmd.begin(), cmd.end());
+            return v;
+  - id: green_led
+    platform: gpio
+    pin: 27
+
+light:
+  - platform: binary
+    name: "${display_name} Green LED"
+    disabled_by_default: true
+    output: green_led
+  - platform: rgb
+    name: "${display_name} Light"
+    id: humidifier_light
+    red: red
+    green: green
+    blue: blue
+    default_transition_length: 0s
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - switch.turn_on: humidifier_power
+      - uart.write:
+          id: uart_bus
+          data: !lambda
+            float r, g, b;
+            id(humidifier_light)->current_values_as_rgb(&r, &g, &b);
+            std::string cmd = "#" + id(model_number).state + ",000,C,5,LM:2,LB:1,R:" + to_string((int)r*100) + ",G:" + to_string((int)g*100) + ",B:" + to_string((int)b*100) + ";";
+            std::vector<unsigned char> v(cmd.begin(), cmd.end());
+            return v;
+    on_turn_off:
+      - select.set:
+          id: humidifier_light_mode
+          option: '0'
+    effects:
+      - random:
+          name: Random
+          transition_length: 60s
+          update_interval: 90s
+
+# Poll device status every minute
+interval:
+  - interval: 1min
+    then:
+      - uart.write:
+          id: uart_bus
+          data: !lambda
+            std::string cmd = "#" + id(model_number).state + ",000,S,1,REQ:ALL;";
+            std::vector<unsigned char> v(cmd.begin(), cmd.end());
+            return v;
+
+text_sensor:
+- platform: template
+  name: "${display_name} Model Number"
+  id: model_number
+- platform: template
+  name: "${display_name} Firmware Version"
+  id: firmware_version
+- platform: custom
+  lambda: |-
+    auto humidifier = new UartReadLineSensor(id(uart_bus));
+    App.register_component(humidifier);
+    return {humidifier};
+  text_sensors:
+    id: "uart_readline"
+    on_value:
+      then:
+        - lambda: |-
+            int tokenIdx = 0;
+            char* part;
+            part = strtok ((char *)x.c_str(), ",:");
+            while (part != NULL) {
+              std::string p = part;
+              switch(tokenIdx) {
+                case 0:
+                  // Model number declaration
+                  id(model_number).publish_state(p.erase(0,1));
+                  break;
+                case 1:
+                  // Device firmware version
+                  id(firmware_version).publish_state(p);
+                  break;
+                case 2:
+                  // Message Type
+                  if(      p == "S" ) { ESP_LOGD("uart_readline", "Command type: device info"); }
+                  else if( p == "E" ) { ESP_LOGD("uart_readline", "Command type: manual update"); }
+                  else if( p == "C" ) { ESP_LOGD("uart_readline", "Command type: command acknowledgement"); }
+                  else if (p.find_first_not_of("0123456789") == std::string::npos) {
+                    part = strtok(NULL, ",:");
+                    char* g = strtok(NULL, ",:");
+                    part = strtok(NULL, ",:");
+                    char* b = strtok(NULL, ",:");
+                    ESP_LOGD("uart_readline", "Command type: RGB value: R:%s G:%s B:%s", p.c_str(), g, b);
+                    id(rgb_mode).publish_state(true);
+                  }
+                  else { ESP_LOGD("uart_readline", "Command type: unknown"); }
+                  break;
+                case 3:
+                  // Payload count
+                  break;
+                default:
+                  // Handle payload
+                  char* value = strtok(NULL, ",:");
+                  std::string v = value;
+                  if(value == NULL) {
+                    ESP_LOGD("uart_readline", "Payload value was null");
+                  }
+                  else if( p == "PWR" ) {
+                    ESP_LOGD("uart_readline", "Power state received: %s", value);
+                    id(humidifier_power).publish_state(!strcmp(value, "1"));
+                  }
+                  else if( p == "HC" ) {
+                    ESP_LOGD("uart_readline", "Level state received");
+                    id(humidifier_level).publish_state(value);
+                  }
+                  else if( p == "LM" ) {
+                    ESP_LOGD("uart_readline", "Light mode state received");
+                    id(humidifier_light_mode).publish_state(value);
+                  }
+                  else if( p == "LC" ) {
+                    ESP_LOGD("uart_readline", "Light color state received");
+                    int lcolor = atoi(value);
+                    id(humidifier_light_color_preset).publish_state(to_string(lcolor));
+                  }
+                  else if( p == "LB" ) {
+                    ESP_LOGD("uart_readline", "Light brightness state received");
+                    // Reverse values since as reported, 1-5 is brightest to dimmest
+                    std::map<std::string, std::string> reverseValues = {
+                      {"1", "5"},
+                      {"2", "4"},
+                      {"3", "3"},
+                      {"4", "2"},
+                      {"5", "1"}
+                    };
+                    id(humidifier_brightness).publish_state(reverseValues[v]);
+                  }
+                  else if( p == "TMR" ) {
+                    ESP_LOGD("uart_readline", "Timer state received");
+                  }
+                  else if( p == "TMRRT" ) {
+                    ESP_LOGD("uart_readline", "Timer remaining state received");
+                  }
+                  else if( p == "MU" ) {
+                    ESP_LOGD("uart_readline", "Mute state received: %s", value);
+                    id(humidifier_sound).publish_state(strcmp(value,"1"));
+                  }
+                  else if( p == "WTR" ) {
+                    ESP_LOGD("uart_readline", "Water level state received");
+                    id(low_water).publish_state(v=="1");
+                  }
+                  else if( p == "IAM" ) {
+                    ESP_LOGD("uart_readline", "Model number state received");
+                  }
+                  else if( p == "LT" ) {
+                    ESP_LOGD("uart_readline", "LT state received");
+                    // Unknown key
+                  }
+                  else if( p == "R" ) {
+                    ESP_LOGD("uart_readline", "Red value state received");
+                    
+                  }
+                  else if( p == "G" ) {
+                    ESP_LOGD("uart_readline", "Green value state received");
+                    
+                  }
+                  else if( p == "B" ) {
+                    ESP_LOGD("uart_readline", "Blue value state received");
+                    
+                  }
+                  break;
+              }
+              tokenIdx++;
+              part = strtok (NULL, ",:");
+            }
